@@ -8,17 +8,19 @@ set_target_properties(minec PROPERTIES
         CXX_STANDARD_REQUIRED ON.
 )
 
+find_package(ZLIB)
 target_link_libraries(minec
         ssl
         crypto
+        ZLIB::ZLIB
 )
 
 target_sources(minec
     PRIVATE
-        src/minec.cpp
+        old_src/minec.cpp
     PUBLIC
     FILE_SET headers
     TYPE HEADERS
     FILES
-        include/minec.hpp
+        old_include/minec.hpp
 )

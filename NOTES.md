@@ -5,6 +5,7 @@
 - [botcraft auth](https://github.com/adepierre/Botcraft/blob/703361dde8fa65632595ea2cafefcbd714c94c1d/botcraft/src/Network/Authentifier.cpp#L599)
 - [MS_AUTH](https://github.com/maxsupermanhd/go-mc-ms-auth/blob/master/auth.go#L85)
 - [AAAAAA](https://minecraft.wiki/w/Java_Edition_protocol/Encryption)
+- [skibidi skibididi skaiodjaopdja](https://github.com/Pumpkin-MC/Pumpkin/blob/master/crates/pumpkin-core/src/lib.rs#L231)
 
 ```c++
 int main()

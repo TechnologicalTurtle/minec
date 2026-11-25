@@ -1,4 +1,4 @@
-#include "include/minec.hpp"
+#include "old_include/minec.hpp"
 
 #include <bitset>
 #include <string>
@@ -10,6 +10,8 @@
 #include <openssl/aes.h>
 
 #include <boost/asio/ssl.hpp>
+
+#include <zlib.h>
 
 #include <iostream>
 
@@ -69,6 +71,111 @@ namespace minec
         }
 
         return result;
+    }
+
+    std::string get_zlib_error(int err)
+    {
+        switch (err)
+        {
+            case Z_OK:
+                return "zlib_error: no error";
+            case Z_STREAM_ERROR:
+                return "zlib_error: invalid compression level";
+            case Z_DATA_ERROR:
+                return "zlib_error: invalid or incomplete deflate data";
+            case Z_MEM_ERROR:
+                return "zlib_error: out of memory";
+            case Z_VERSION_ERROR:
+            case Z_NEED_DICT:
+                err = Z_DATA_ERROR;
+            default:
+                return "zlib_error: unknown error " + std::to_string(err);
+        }
+    }
+    bool compress(std::vector<uint8_t>& input, std::vector<uint8_t>& compressed)
+    {
+        int err;
+        z_stream strm;
+
+        // initialize compression
+        strm.zalloc = Z_NULL;
+        strm.zfree = Z_NULL;
+        strm.opaque = Z_NULL;
+        err = deflateInit(&strm, Z_DEFAULT_COMPRESSION);
+        if (err != Z_OK)
+        {
+            std::cerr << get_zlib_error(err) << '\n';
+            return false;
+        }
+
+        // compress
+        strm.avail_in = input.size();
+        strm.next_in = &input[0];
+
+        do
+        {
+            strm.avail_out = COMPRESSION_CHUNK;
+            compressed.resize(compressed.size() + COMPRESSION_CHUNK);
+            strm.next_out = &compressed[compressed.size() - COMPRESSION_CHUNK];
+
+            // deflates CHUNK of bytes from strm;
+            // Z_FINISH is used as we call deflate only once
+            err = deflate(&strm, Z_FINISH);
+            if (err == Z_STREAM_ERROR)
+            {
+                std::cerr << get_zlib_error(err) << '\n';
+                return false;
+            }
+        } while (strm.avail_out == 0);
+        deflateEnd(&strm);
+        compressed.resize(compressed.size() - strm.avail_out);
+        return true;
+    }
+    bool decompress(std::vector<uint8_t>& compressed, std::vector<uint8_t>& decompressed)
+    {
+        int err;
+        z_stream strm;
+
+        // initialize decompression
+        strm.zalloc = Z_NULL;
+        strm.zfree = Z_NULL;
+        strm.opaque = Z_NULL;
+        err = inflateInit(&strm);
+        if (err != Z_OK)
+        {
+            std::cerr << get_zlib_error(err) << '\n';
+            return false;
+        }
+
+        // decompress
+        strm.avail_in = compressed.size();
+        strm.next_in = &compressed[0];
+
+        do {
+            strm.avail_out = COMPRESSION_CHUNK;
+            decompressed.resize(decompressed.size() + COMPRESSION_CHUNK);
+            strm.next_out = &decompressed[decompressed.size()-COMPRESSION_CHUNK];
+            err = inflate(&strm, Z_NO_FLUSH);
+            if (err == Z_STREAM_ERROR)
+            {
+                std::cerr << get_zlib_error(err) << '\n';
+                return false;
+            }
+            switch (err)
+            {
+                case Z_NEED_DICT:
+                    err = Z_DATA_ERROR;
+                case Z_DATA_ERROR:
+                case Z_MEM_ERROR:
+                    (void)inflateEnd(&strm);
+                    std::cerr << get_zlib_error(err) << '\n';
+                    return false;
+            }
+        } while (strm.avail_out == 0);
+        inflateEnd(&strm);
+        decompressed.resize(decompressed.size() - strm.avail_out);
+
+        return true;
     }
 
     sha1::sha1()
@@ -216,14 +323,26 @@ namespace minec
     {
         socket.write_some(asio::buffer(buffer.data(), buffer.size()), ec);
     }
-    void packet_buffer::prep_and_send(asio::ip::tcp::socket& socket, system::error_code& ec)
+    void packet_buffer::prep_and_send(asio::ip::tcp::socket& socket, system::error_code& ec, size_t compression_threshold)
     {
-        finalize();
+        finalize(compression_threshold);
         write_some(socket, ec);
     }
 
-    void packet_buffer::finalize()
+    void packet_buffer::finalize(size_t compression_threshold)
     {
+        if (compression_threshold != -1)
+        {
+            size_t data_length = buffer.size();
+            if (data_length >= compression_threshold)
+            {
+                std::vector<uint8_t> input = buffer;
+                compress(input, buffer);
+                write_var_int(data_length, 0);
+            }
+            else
+                write_var_int(0, 0);
+        }
         write_var_int(buffer.size(), 0);
     }
 
@@ -336,8 +455,13 @@ namespace minec
         std::vector<unsigned char> arr = read_byte_arr();
         return {arr.begin(), arr.end()};
     }
+    vec3i packet_buffer::read_position()
+    {
+        auto raw_pos = read_number<unsigned long long>();
+        return vec3i{static_cast<int>(raw_pos>>38), static_cast<int>(raw_pos<<52>>52), static_cast<int>(raw_pos<<26>>38)};
+    }
 
-    packet_buffer packet_buffer::receive(asio::ip::tcp::socket& socket, system::error_code& ec, bool encrypted, aes_encrypter* that_thing)
+    packet_buffer packet_buffer::receive(asio::ip::tcp::socket& socket, system::error_code& ec, size_t compression_threshold, bool encrypted, aes_encrypter* that_thing)
     {
         packet_buffer response;
         bool success = false; size_t expected_sz = -1;
@@ -354,12 +478,25 @@ namespace minec
             expected_sz = response.read_var_int(&success);
             response.pointer = 0;
         }
-        std::cerr << "EXPECTED SIZE: " << expected_sz << '\n';
         response.buffer.resize(expected_sz);
         asio::read(socket, asio::buffer(response.buffer.data(), response.buffer.size()), asio::transfer_exactly(expected_sz), ec);
 
         if (encrypted)
             response.buffer = that_thing->decrypt(response.buffer);
+
+        if (compression_threshold != -1)
+        {
+            uint8_t data_length_val_length = -1;
+            size_t data_length = response.read_var_int(nullptr, &data_length_val_length);
+            response.buffer.erase(response.buffer.begin(), response.buffer.begin() + data_length_val_length);
+            if (data_length != 0)
+            {
+                std::vector<uint8_t> compressed = response.buffer;
+                response.buffer.clear();
+                decompress(compressed, response.buffer);
+            }
+            response.pointer = 0;
+        }
 
         return response;
     }
@@ -747,17 +884,17 @@ namespace minec
         int error_code;
         std::string got = send_web_request("api.minecraftservices.com", raw_info_req, error_code);
 
-        std::ofstream cache_file_out("minec_mcprof_cache.txt");
-        cache_file_out << time(nullptr)+24*60*60 << got;
-        cache_file_out.close();
-
         nlohmann::json response = nlohmann::json::parse(got);
-
         if (!response.contains("id") || !response.contains("name")
-                     || !response.contains("skins") || !response.contains("capes")) {
+                     || !response.contains("skins") || !response.contains("capes"))
+        {
             std::cerr << "access key probably expired... gotta fetch the program again ;(\n got (" << response.dump(2) << ")\n";
             throw std::exception();
         }
+
+        std::ofstream cache_file_out("minec_mcprof_cache.txt");
+        cache_file_out << time(nullptr)+24*60*60 << '\n' << got;
+        cache_file_out.close();
 
         return {response};
     }

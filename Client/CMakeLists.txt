@@ -9,15 +9,11 @@ set_target_properties(Client PROPERTIES
         CMAKE_CXX_STANDARD_REQUIRED ON
 )
 
-find_package(ZLIB)
 target_link_libraries(Client
     minec
-    ssl
-    crypto
-    ZLIB::ZLIB
 )
 
 target_sources(Client
     PRIVATE
-        main.cpp
+        old_main.cpp
 )

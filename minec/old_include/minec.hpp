@@ -65,6 +65,10 @@ namespace minec
         void print() const;
     };
 
+    #define COMPRESSION_CHUNK 255
+    bool compress(std::vector<uint8_t>& input, std::vector<uint8_t>& compressed);
+    bool decompress(std::vector<uint8_t>& compressed, std::vector<uint8_t>& decompressed);
+
     class sha1
     {
     private:
@@ -95,6 +99,14 @@ namespace minec
         std::vector<uint8_t> decrypt(const std::vector<uint8_t>& input);
     };
 
+    struct vec3i
+    {
+        int x = 0;
+        int y = 0;
+        int z = 0;
+        vec3i(int x, int y, int z): x(x), y(y), z(z) {}
+    };
+
     class packet_buffer
     {
     private:
@@ -104,9 +116,9 @@ namespace minec
         size_t pointer = 0;
 
         void write_some(boost::asio::ip::tcp::socket& socket, boost::system::error_code& ec);
-        void prep_and_send(boost::asio::ip::tcp::socket& socket, boost::system::error_code& ec);
+        void prep_and_send(boost::asio::ip::tcp::socket& socket, boost::system::error_code& ec, size_t compression_threshold = -1);
 
-        void finalize();
+        void finalize(size_t compression_threshold = -1);
 
         void write_var_int(unsigned int value, size_t where = -1);
 
@@ -134,7 +146,21 @@ namespace minec
         std::vector<uint8_t> read_byte_arr();
         std::string read_string();
 
-        static packet_buffer receive(boost::asio::ip::tcp::socket& socket, boost::system::error_code& ec, bool encrypted = true, aes_encrypter* that_thing = nullptr);
+        template <typename T>
+        T read_number()
+        {
+            T value;
+            size_t i = pointer;
+            for (; i < pointer+sizeof(T); ++i)
+            {
+                value = (value << 8) | buffer[i];
+            }
+            pointer = i;
+            return value;
+        }
+        vec3i read_position();
+
+        static packet_buffer receive(boost::asio::ip::tcp::socket& socket, boost::system::error_code& ec, size_t compression_threshold = -1, bool encrypted = true, aes_encrypter* that_thing = nullptr);
 
         packet_buffer() = default;
         packet_buffer(unsigned int packet_id);
